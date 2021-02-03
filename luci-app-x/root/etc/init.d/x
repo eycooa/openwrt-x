@@ -1,0 +1,21 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=15
+
+boot() {
+	/usr/share/x/app.sh boot
+}
+
+start() {
+	/usr/share/x/app.sh start
+}
+
+stop() {
+	/usr/share/x/app.sh stop
+}
+
+restart() {
+	stop
+	start
+}

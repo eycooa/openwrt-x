@@ -1,0 +1,11 @@
+{
+	"luci-app-x": {
+		"description": "Grant UCI access for luci-app-x",
+		"read": {
+			"uci": [ "x", "x_server" ]
+		},
+		"write": {
+			"uci": [ "x", "x_server" ]
+		}
+	}
+}

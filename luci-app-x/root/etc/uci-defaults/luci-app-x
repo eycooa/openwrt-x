@@ -1,0 +1,29 @@
+#!/bin/sh
+
+uci -q batch <<-EOF >/dev/null
+	delete ucitrack.@x[-1]
+	add ucitrack x
+	set ucitrack.@x[-1].init=x
+	commit ucitrack
+	delete firewall.x
+	set firewall.x=include
+	set firewall.x.type=script
+	set firewall.x.path=/var/etc/x.include
+	set firewall.x.reload=1
+	commit firewall
+	delete ucitrack.@x_server[-1]
+	add ucitrack x_server
+	set ucitrack.@x_server[-1].init=x_server
+	commit ucitrack
+	delete firewall.x_server
+	set firewall.x_server=include
+	set firewall.x_server.type=script
+	set firewall.x_server.path=/var/etc/x_server.include
+	set firewall.x_server.reload=1
+	commit firewall
+	set uhttpd.main.max_requests=50
+	commit uhttpd
+EOF
+
+rm -rf /tmp/luci-*cache
+exit 0
