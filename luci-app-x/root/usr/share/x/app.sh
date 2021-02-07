@@ -281,6 +281,8 @@ LOCALHOST_TCP_PROXY_MODE=$(config_t_get global localhost_tcp_proxy_mode default)
 LOCALHOST_UDP_PROXY_MODE=$(config_t_get global localhost_udp_proxy_mode default)
 [ "$LOCALHOST_TCP_PROXY_MODE" == "default" ] && LOCALHOST_TCP_PROXY_MODE=$TCP_PROXY_MODE
 [ "$LOCALHOST_UDP_PROXY_MODE" == "default" ] && LOCALHOST_UDP_PROXY_MODE=$UDP_PROXY_MODE
+RESOLVFILE=/tmp/resolv.conf.d/resolv.conf.auto
+[ -f "${RESOLVFILE}" ] && [ -s "${RESOLVFILE}" ] || RESOLVFILE=/tmp/resolv.conf.auto
 
 load_config() {
 	[ "$ENABLED" != 1 ] && NO_PROXY=1
@@ -289,20 +291,21 @@ load_config() {
 		NO_PROXY=1
 	}
 	
+	global=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "global")
+	returnhome=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "returnhome")
+	chnlist=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "chnroute")
+	gfwlist=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "gfwlist")
 	DNS_MODE=$(config_t_get global dns_mode doh)
 	DNS_FORWARD=$(config_t_get global dns_forward 8.8.4.4:53 | sed 's/:/#/g')
 	DNS_CACHE=$(config_t_get global dns_cache 0)
-	LOCAL_DNS=$(config_t_get global dns_mode default)
+	LOCAL_DNS="default"
 	if [ "${LOCAL_DNS}" = "default" ]; then
 		DEFAULT_DNS=$(uci show dhcp | grep "@dnsmasq" | grep ".server=" | awk -F '=' '{print $2}' | sed "s/'//g" | tr ' ' ',')
-		if [ -n "${DEFAULT_DNS}" ]; then
-			IS_DEFAULT_DNS=1
-		else
-			RESOLVFILE=/tmp/resolv.conf.d/resolv.conf.auto
-			[ -f "${RESOLVFILE}" ] && [ -s "${RESOLVFILE}" ] || RESOLVFILE=/tmp/resolv.conf.auto
+		if [ -z "${DEFAULT_DNS}" ]; then
 			DEFAULT_DNS=$(echo -n $(sed -n 's/^nameserver[ \t]*\([^ ]*\)$/\1/p' "${RESOLVFILE}" | grep -v "0.0.0.0" | grep -v "127.0.0.1" | grep -v "^::$" | head -2) | tr ' ' ',')
 		fi
 		LOCAL_DNS="${DEFAULT_DNS:-119.29.29.29}"
+		IS_DEFAULT_DNS=1
 	fi
 	PROXY_IPV6=$(config_t_get global_forwarding proxy_ipv6 0)
 	mkdir -p /var/etc $TMP_PATH $TMP_BIN_PATH $TMP_ID_PATH $TMP_PORT_PATH
@@ -404,6 +407,16 @@ run_redir() {
 			local proto="-proto tcp"
 			[ "$UDP_NODE" == "tcp" ] && proto="-proto tcp,udp"
 			local extra_param="${proto}"
+			[ "$tcp_node_socks" = "1" ] && {
+				local socks_param="-socks_proxy_port $tcp_node_socks_port"
+				extra_param="${extra_param} ${socks_param}"
+				config_file=$(echo $config_file | sed "s/TCP/TCP_SOCKS_$tcp_node_socks_id/g")
+			}
+			[ "$tcp_node_http" = "1" ] && {
+				local http_param="-http_proxy_port $tcp_node_http_port"
+				extra_param="${extra_param} ${http_param}"
+				config_file=$(echo $config_file | sed "s/TCP/TCP_HTTP_$tcp_node_http_id/g")
+			}
 			lua $API_GEN_XRAY -node $node -redir_port $local_port -loglevel $loglevel $extra_param > $config_file
 			ln_start_bin "$(first_type $(config_t_get global_app xray_file) xray)" xray $log_file -config="$config_file"
 		;;
@@ -459,6 +472,17 @@ start_socks() {
 		local log_file=$TMP_PATH/SOCKS_${id}.log
 		local http_port=$(config_n_get $id http_port 0)
 		local http_config_file=$TMP_PATH/HTTP2SOCKS_${id}.json
+		[ "$node" == "tcp" ] && {
+			tcp_node_socks=1
+			tcp_node_socks_port=$port
+			tcp_node_socks_id=$id
+			[ "$http_port" != "0" ] && {
+				tcp_node_http=1
+				tcp_node_http_port=$http_port
+				tcp_node_http_id=$id
+			}
+			continue
+		}
 		run_socks $id $node "0.0.0.0" $port $config_file $http_port $http_config_file
 	done
 }
@@ -536,17 +560,7 @@ start_dns() {
 		LOCAL_DNS="127.0.0.1#${LOCAL_DOH_PORT}"
 		unset _doh _doh_url _doh_bootstrap
 	fi
-	
-	local other_port msg
-	local global chnlist returnhome china_ng_chn china_ng_gfw chnlist_param gfwlist_param extra_mode
 	dns_listen_port=${DNS_PORT}
-	other_port=$(expr $DNS_PORT + 1)
-	china_ng_gfw="127.0.0.1#${other_port}"
-	china_ng_chn="${LOCAL_DNS}"
-	returnhome=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "returnhome")
-	global=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "global")
-	chnlist=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "chnroute")
-	[ -n "${returnhome}" ] && china_ng_chn="${china_ng_gfw}" && china_ng_gfw="${LOCAL_DNS}"
 	sed -n 's/^ipset=\/\.\?\([^/]*\).*$/\1/p' "${RULES_PATH}/gfwlist.conf" | sort -u > "${TMP_PATH}/gfwlist.txt"
 	echolog "过滤服务配置：准备接管域名解析[$?]..."
 	
@@ -611,11 +625,6 @@ add_dnsmasq() {
 	if [ "${DNS_MODE}" = "nonuse" ]; then
 		echolog "  - 不对域名进行分流解析"
 	else
-		global=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "global")
-		returnhome=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "returnhome")
-		chnlist=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "chnroute")
-		gfwlist=$(echo "${TCP_PROXY_MODE}${LOCALHOST_TCP_PROXY_MODE}${UDP_PROXY_MODE}${LOCALHOST_UDP_PROXY_MODE}" | grep "gfwlist")
-		
 		#始终用国内DNS解析节点域名
 		fwd_dns="${LOCAL_DNS}"
 		servers=$(uci show "${CONFIG}" | grep ".address=" | cut -d "'" -f 2)
@@ -626,6 +635,21 @@ add_dnsmasq() {
 		fwd_dns="${LOCAL_DNS}"
 		sort -u "${RULES_PATH}/direct_host" | gen_dnsmasq_items "whitelist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/01-direct_host.conf"
 		echolog "  - [$?]域名白名单(whitelist)：${fwd_dns:-默认}"
+		
+		#始终使用远程DNS解析代理（黑名单）列表
+		fwd_dns="${TUN_DNS}"
+		sort -u "${RULES_PATH}/proxy_host" | gen_dnsmasq_items "blacklist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-proxy_host.conf"
+		echolog "  - [$?]代理域名表(blacklist)：${fwd_dns:-默认}"
+		
+		#如果开启了通过代理订阅
+		[ "$(config_t_get global_subscribe subscribe_proxy 0)" = "1" ] && {
+			fwd_dns="${TUN_DNS}"
+			items=$(get_enabled_anonymous_secs "@subscribe_list")
+			for item in ${items}; do
+				host_from_url "$(config_n_get ${item} url)" | gen_dnsmasq_items "blacklist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-subscribe.conf"
+				echolog "  - [$?]节点订阅域名，$(host_from_url $(config_n_get ${item} url))：${fwd_dns:-默认}"
+			done
+		}
 		
 		#分流规则
 		[ "$(config_n_get $TCP_NODE protocol)" = "_shunt" ] && {
@@ -642,28 +666,18 @@ add_dnsmasq() {
 			done
 		}
 
-		#始终使用远程DNS解析代理（黑名单）列表
-		fwd_dns="${TUN_DNS}"
-		sort -u "${RULES_PATH}/proxy_host" | gen_dnsmasq_items "blacklist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-proxy_host.conf"
-		echolog "  - [$?]代理域名表(blacklist)：${fwd_dns:-默认}"
-
 		#如果没有使用回国模式
-		[ -z "${returnhome}" ] && {
+		if [ -z "${returnhome}" ]; then
 			fwd_dns="${TUN_DNS}"
 			sort -u "${TMP_PATH}/gfwlist.txt" | gen_dnsmasq_items "gfwlist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-gfwlist.conf"
 			#sort -u "${TMP_PATH}/gfwlist.txt" | gen_dnsmasq_items "gfwlist,gfwlist6" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-gfwlist.conf"
 			echolog "  - [$?]防火墙域名表(gfwlist)：${fwd_dns:-默认}"
-		}
-
-		#如果开启了通过代理订阅
-		[ "$(config_t_get global_subscribe subscribe_proxy 0)" = "1" ] && {
+		else
+			#回国模式
 			fwd_dns="${TUN_DNS}"
-			items=$(get_enabled_anonymous_secs "@subscribe_list")
-			for item in ${items}; do
-				host_from_url "$(config_n_get ${item} url)" | gen_dnsmasq_items "blacklist" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/99-subscribe.conf"
-				echolog "  - [$?]节点订阅域名，$(host_from_url $(config_n_get ${item} url))：${fwd_dns:-默认}"
-			done
-		}
+			sort -u "${RULES_PATH}/chnlist" | gen_dnsmasq_items "chnroute" "${fwd_dns}" "${TMP_DNSMASQ_PATH}/02-chinalist_host.conf"
+			echolog "  - [$?]中国域名表(chnroute)：${fwd_dns:-默认}"
+		fi
 	fi
 	
 	if [ "${DNS_MODE}" != "nouse" ]; then
